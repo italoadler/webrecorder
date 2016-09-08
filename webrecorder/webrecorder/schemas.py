@@ -43,7 +43,7 @@ class NewUserSchema(UserSchema):
     def custom_validation(self, data):
         """Custom validation for user signup"""
 
-        if 'password' not in data.keys():
+        if 'password' not in data:
             raise ValidationError('`password` is a required field.')
 
         if not RDM.PASS_RX.match(data['password']):

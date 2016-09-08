@@ -58,13 +58,13 @@ class UserController(BaseController):
             data = request.json
             err = NewUserSchema().validate(data)
 
-            if 'username' in data.keys() and data['username'] in users:
+            if 'username' in data and data['username'] in users:
                 if not err:
                     return {'errors': 'Username already exists'}
                 else:
                     err.update({'username': 'Username already exists'})
 
-            if 'email' in data.keys() and data['email'] in emails:
+            if 'email' in data and data['email'] in emails:
                 if not err:
                     return {'errors': 'Email already exists'}
                 else:
@@ -170,7 +170,7 @@ class UserController(BaseController):
             if len(err):
                 return {'errors': err}
 
-            if 'name' in data.keys():
+            if 'name' in data:
                 user['desc'] = '{{"name":"{name}"}}'.format(name=data.get('name', ''))
 
             return {'status': 'OK'}
