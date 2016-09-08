@@ -5,6 +5,7 @@ import re
 import json
 import os
 import base64
+import hashlib
 
 from datetime import datetime
 
@@ -12,6 +13,8 @@ from bottle import template, request, HTTPError
 
 from webrecorder.webreccork import ValidationException
 from webrecorder.redisutils import RedisTable
+from webrecorder.webreccork import WebRecCork
+
 from cork import AAAException
 
 from six.moves.urllib.parse import quote
@@ -19,6 +22,7 @@ from six.moves.urllib.parse import quote
 from pywb.utils.canonicalize import calc_search_range
 from pywb.cdx.cdxobject import CDXObject
 from pywb.utils.timeutils import timestamp_now
+from webagg.utils import load_config
 
 import requests
 
@@ -48,7 +52,8 @@ class LoginManagerMixin(object):
             print('WARNING: Unable to init defaults: ' + str(e))
 
         self.user_key = config['info_key_templ']['user']
-        self.user_skip_key = config['user_skip_key']
+        self.user_skip_key = config['skip_key_templ']
+        self.skip_key_secs = int(config['skip_key_secs'])
 
         self.rename_url_templ = config['url_templates']['rename']
 
@@ -58,11 +63,29 @@ class LoginManagerMixin(object):
 
         self.reports_email = os.environ.get('SUPPORT_EMAIL')
 
+        mailing_list = os.environ.get('MAILING_LIST', '').lower()
+        self.mailing_list = mailing_list in ('true', '1', 'yes')
+        self.list_endpoint = os.environ.get('MAILING_LIST_ENDPOINT', '')
+        self.list_key = os.environ.get('MAILING_LIST_KEY', '')
+        self.list_removal_endpoint = os.path.expandvars(
+                                        os.environ.get('MAILING_LIST_REMOVAL', ''))
+        self.payload = os.environ.get('MAILING_LIST_PAYLOAD', '')
+        self.remove_on_delete = (os.environ.get('REMOVE_ON_DELETE', '')
+                                    in ('true', '1', 'yes'))
+
+    def get_users(self):
+        return RedisTable(self.redis, 'h:users')
+
     def create_user(self, reg):
         try:
             user, init_info = self.cork.validate_registration(reg)
         except AAAException as a:
             raise ValidationException(a)
+
+        if init_info:
+            init_info = json.loads(init_info)
+        else:
+            init_info = {}
 
         key = self.user_key.format(user=user)
         now = int(time.time())
@@ -78,6 +101,7 @@ class LoginManagerMixin(object):
             pi.hset(key, 'max_size', max_size)
             pi.hset(key, 'max_coll', max_coll)
             pi.hset(key, 'created_at', now)
+            pi.hset(key, 'name', init_info.get('name', ''))
             pi.hsetnx(key, 'size', '0')
 
         self.cork.do_login(user)
@@ -86,9 +110,10 @@ class LoginManagerMixin(object):
             sesh.curr_user = user
 
         # Move Temp collection to be permanent
-        if init_info:
-            init_info = json.loads(init_info)
-            self.move_temp_coll(user, init_info)
+        move_info = init_info.get('move_info')
+        if move_info:
+            self.move_temp_coll(user, move_info)
+
             first_coll = init_info.get('to_title')
 
         else:
@@ -99,6 +124,37 @@ class LoginManagerMixin(object):
                                    public=False)
 
             first_coll = self.default_coll['title']
+
+        # Check for mailing list management
+        if self.mailing_list:
+            if not self.list_endpoint or not self.list_key:
+                # fail silently, log info
+                print('MAILING_LIST is turned on, but required '
+                      'fields are missing.')
+            else:
+                # post new user to mailing list, with a 1.5s timeout.
+                # TODO: move this to a task queue
+                try:
+                    uinfo = self.get_user_info(user)
+                    res = requests.post(self.list_endpoint,
+                                        auth=('nop', self.list_key),
+                                        data=self.payload.format(
+                                            email=self.get_user_email(user),
+                                            name=(uinfo.get('name', None) or ''),
+                                            username=user),
+                                        timeout=1.5
+                    )
+
+                    if res.status_code != 200:
+                        print('Unexpected mailing list API response.. '
+                              'status code: {0.status_code}\n'
+                              'content: {0.content}'.format(res))
+
+                except Exception as e:
+                    if e is requests.exceptions.Timeout:
+                        print('Mailing list API timed out..')
+                    else:
+                        print('Adding to mailing list failed:', e)
 
         return user, first_coll
 
@@ -142,6 +198,33 @@ class LoginManagerMixin(object):
     def delete_user(self, user):
         if not self.is_anon(user):
             self.assert_user_is_owner(user)
+
+        # Check for mailing list & removal endpoint
+        if self.mailing_list and self.remove_on_delete:
+            if not self.list_removal_endpoint or not self.list_key:
+                # fail silently, log info
+                print('REMOVE_ON_DELETE is turned on, but required '
+                      'fields are missing.')
+            else:
+                # remove user from the mailing list, with a 1.5s timeout.
+                # TODO: move this to a task queue
+                try:
+                    email = self.get_user_email(user).encode('utf-8').lower()
+                    email_hash = hashlib.md5(email).hexdigest()
+                    res = requests.delete(self.list_removal_endpoint.format(email_hash),
+                                          auth=('nop', self.list_key),
+                                          timeout=1.5)
+
+                    if res.status_code != 204:
+                        print('Unexpected mailing list API response.. '
+                              'status code: {0.status_code}\n'
+                              'content: {0.content}'.format(res))
+
+                except Exception as e:
+                    if e is requests.exceptions.Timeout:
+                        print('Mailing list API timed out..')
+                    else:
+                        print('Removing from mailing list failed:', e)
 
         res = self._send_delete('user', user)
         if res and not self.is_anon(user):
@@ -190,7 +273,7 @@ class LoginManagerMixin(object):
     def get_user_email(self, user):
         if not user:
             return ''
-        all_users = RedisTable(self.redis, 'h:users')
+        all_users = self.get_users()
         userdata = all_users[user]
         if userdata:
             return userdata.get('email_addr', '')
@@ -300,29 +383,37 @@ class LoginManagerMixin(object):
         for key in issues.iterkeys():
             issues_dict[key] = issues.getunicode(key)
 
+        now = str(datetime.utcnow())
+
         user = self.get_curr_user()
         issues_dict['user'] = user
-        issues_dict['time'] = str(datetime.utcnow())
+        issues_dict['time'] = now
         issues_dict['ua'] = ua
         issues_dict['user_email'] = self.get_user_email(user)
+        if not issues_dict.get('email'):
+            issues_dict['email'] = issues_dict['user_email']
 
         report = json.dumps(issues_dict)
 
         self.redis.rpush('h:reports', report)
 
+        subject = "[Doesn't Look Right] Error Report - {0}".format(now)
+
         if self.reports_email and error_email_templ:
             email_text = error_email_templ(issues_dict)
-            self.cork.mailer.send_email(self.reports_email, "[Doesn't Look Right] Error Report", email_text)
+            self.cork.mailer.send_email(self.reports_email, subject, email_text)
 
     def skip_post_req(self, user, url):
         key = self.user_skip_key.format(user=user, url=url)
-        self.redis.setex(key, 300, 1)
+        r = self.redis.setex(key, self.skip_key_secs, 1)
 
     def rename(self, user, coll, new_coll, rec='*', new_rec='*',
                new_user='', title='', is_move=False):
 
         if not new_user:
             new_user = user
+
+        self.assert_can_admin(new_user, new_coll)
 
         if is_move:
             if not self.has_collection(new_user, new_coll):
@@ -459,12 +550,20 @@ class AccessManagerMixin(object):
     # for now, equivalent to is_owner(), but a different
     # permission, and may change
     def can_admin_coll(self, user, coll):
+        sesh = request.environ['webrec.session']
+        if sesh.is_restricted:
+            return False
+
         if self.is_anon(user):
             return True
 
         return self.is_owner(user)
 
     def is_owner(self, user):
+        sesh = request.environ['webrec.session']
+        if sesh.is_restricted:
+            return False
+
         curr_user = self.get_curr_user()
         if not curr_user:
             return self.is_anon(user)
@@ -843,8 +942,14 @@ class CollManagerMixin(object):
 
         return self._has_collection_no_access_check(user, coll)
 
-    def create_collection(self, user, coll, coll_title, desc='', public=False):
-        self.assert_can_admin(user, coll)
+    def create_collection(self, user, coll, coll_title, desc='', public=False, synthetic=False):
+        """Create a collection.
+           :param synthetic: whether this request is from a command line script
+                             `True` or web request `False`
+           :type synthetic: boolean
+        """
+        if not synthetic:
+            self.assert_can_admin(user, coll)
 
         orig_coll = coll
         orig_coll_title = coll_title
@@ -870,7 +975,9 @@ class CollManagerMixin(object):
                 pi.hset(key, self.READ_PREFIX + self.PUBLIC, 1)
             pi.hsetnx(key, 'size', '0')
 
-        return self.get_collection(user, coll)
+        if not synthetic:
+            return self.get_collection(user, coll)
+        return None
 
     def num_collections(self, user):
         key_pattern = self.coll_info_key.format(user=user, coll='*')
@@ -1024,3 +1131,22 @@ class RedisDataManager(AccessManagerMixin, LoginManagerMixin, DeleteManagerMixin
         self.browser_redis = browser_redis
 
         super(RedisDataManager, self).__init__(config)
+
+
+# ============================================================================
+def init_manager_for_cli():
+        config = load_config('WR_CONFIG', None,
+                             'WR_USER_CONFIG', None)
+
+        # Init Redis
+        redis_url = os.environ['REDIS_BASE_URL']
+
+        r = redis.StrictRedis.from_url(redis_url)
+
+        # Init Cork
+        cork = WebRecCork.create_cork(r, config)
+
+        # Init Manager
+        manager = RedisDataManager(r, cork, None, config)
+
+        return manager

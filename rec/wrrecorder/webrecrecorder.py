@@ -62,7 +62,6 @@ class WebRecRecorder(object):
 
         self.app.delete('/delete', callback=self.delete)
         self.app.get('/rename', callback=self.rename)
-        self.app.put('/upload', callback=self.upload)
 
         debug(True)
 
@@ -273,36 +272,6 @@ class WebRecRecorder(object):
                 except Exception as e:
                     print(e)
 
-    # Upload Handling ===========
-    def upload(self):
-        try:
-            return self.upload_actual()
-        except:
-            import traceback
-            traceback.print_exc()
-
-    def upload_actual(self):
-        user = request.query.getunicode('user', '')
-        coll = request.query.getunicode('coll', '')
-        rec = request.query.getunicode('rec', '')
-        if not user or not coll or not rec:
-            return {'error_message': 'user, coll, rec required'}
-
-        stream = request.body
-
-        params = {'param.user': user,
-                  'param.coll': coll,
-                  'param.rec': rec
-                 }
-
-        #params['_formatter'] = ParamFormatter(params, name=self.rec_source_name)
-
-        if self.recorder.writer.write_stream_to_file(params, stream):
-            return {'success': 'true'}
-        else:
-            return {'error_message': 'upload error'}
-
-
     # Delete Handling ===========
 
     def delete(self):
@@ -474,7 +443,7 @@ class SkipCheckingMultiFileWARCWriter(MultiFileWARCWriter):
         skip_key = res_template(self.skip_key_template, params)
 
         if self.redis.get(skip_key) == b'1':
-            print('SKIPPING REQ', target_uri)
+            print('SKIPPING REQ', params.get('url'))
             return False
 
         return True

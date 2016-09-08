@@ -20,6 +20,8 @@ import re
 import boto
 import shutil
 import datetime
+import sys
+import logging
 
 from io import BytesIO
 
@@ -60,7 +62,7 @@ class Migrater(object):
 
     def add_h_tables(self):
         for key in self.src_redis.scan_iter('h:*'):
-            print(key)
+            logging.info(key)
 
             if self.dst_redis.exists(key):
                 continue
@@ -100,7 +102,7 @@ class Migrater(object):
         new_info['size'] = '0'
         new_info['max_coll'] = '1000'
 
-        print('USER: ' + to_key)
+        logging.info('USER: ' + to_key)
         if not self.dry:
             self.dst_redis.hmset(to_key, new_info)
 
@@ -125,7 +127,7 @@ class Migrater(object):
         if res == '1':
             collection['r:@public'] = '1'
 
-        print('  COLL: ' + to_key)
+        logging.info('  COLL: ' + to_key)
         if not self.dry:
             self.dst_redis.hmset(to_key, collection)
 
@@ -140,7 +142,7 @@ class Migrater(object):
         recording = dict(id=rec,
                          title=title)
 
-        print('  REC: ' + key)
+        logging.info('  REC: ' + key)
         if self.dry:
             return
 
@@ -170,9 +172,9 @@ class Migrater(object):
 
             new_pages[page_key] = json.dumps(page)
 
-        print('  PAGES: ' + str(len(new_pages)))
+        logging.info('  PAGES: ' + str(len(new_pages)))
 
-        #print(new_pages)
+        #logging.info(new_pages)
         if self.dry:
             return
 
@@ -212,7 +214,7 @@ class Migrater(object):
 
         # Warcs for Snapshots
         if self.process_warcs(user, coll, rec_static_snap, True) > 0:
-            print('  HAS SNAPSHOTS')
+            logging.info('  HAS SNAPSHOTS')
             self.add_rec(user, coll, rec_static_snap, title + ' Static Snapshots')
             self.add_pages(user, coll, rec_static_snap, True)
 
@@ -223,7 +225,7 @@ class Migrater(object):
 
         warcs = self.src_redis.hgetall(from_key)
 
-        print('  WARCS: ' + to_key)
+        logging.info('  WARCS: ' + to_key)
 
         if is_snapshot:
             suffix = '-snapshot'
@@ -245,16 +247,16 @@ class Migrater(object):
 
                 try:
                     self.append_warc(fh, path)
-                    print('    {0}: {1}'.format(name, fh.tell()))
+                    logging.info('    {0}: {1}'.format(name, fh.tell()))
                 except:
-                    print('ERROR on ' + path)
+                    logging.info('ERROR on ' + path)
 
             size = fh.tell()
             if not size:
                 return size
 
-            print('  TOTAL: ' + str(size))
-            print('  Uploading ' + full_path)
+            logging.info('  TOTAL: ' + str(size))
+            logging.info('  Uploading ' + full_path)
 
             # UPLOAD
             if not self.dry:
@@ -322,12 +324,12 @@ class Migrater(object):
             min_ = timestamp_to_sec(min_)
             max_ = timestamp_to_sec(max_)
 
-        print('  CDXJ: ', count, min_, max_)
+        logging.info('  CDXJ: {0} {1} {2}'.format(count, min_, max_))
         return min_, max_
 
     def append_warc(self, dest, path):
         if not path.startswith('s3://'):
-            print('SKIPPING INVALID ' + path)
+            logging.info('SKIPPING INVALID ' + path)
             return
 
         parts = urlsplit(path)
@@ -356,14 +358,18 @@ def main():
     src = os.environ['SRC_REDIS']
     dst = os.environ['DEST_REDIS']
 
+    logging.basicConfig(format='%(asctime)s: [%(levelname)s]: %(message)s', level=logging.INFO)
+
     m = Migrater(src, dst,
                  os.environ['DEST_PREFIX'], dry_run=False)
 
     m.add_h_tables()
 
-    #m.process_all_users()
+    if len(sys.argv) > 1:
+        m.process_user(sys.argv[0])
 
-    m.process_user('fkneist')
+    else:
+        m.process_all_users()
 
 
 main()
